@@ -1,0 +1,154 @@
+diff --git a/librecomp/src/mods.cpp b/librecomp/src/mods.cpp
+index 99a3656..0395cc3 100644
+--- a/librecomp/src/mods.cpp
++++ b/librecomp/src/mods.cpp
+@@ -485,6 +485,9 @@ recomp::mods::LiveRecompilerCodeHandle::LiveRecompilerCodeHandle(
+     }
+     base_event_index = inputs.base_event_index;
+ 
++#ifdef __PS4__ // PS4: no live recompiler (JIT); code mods are refused when their symbols are parsed.
++    is_good = false;
++#else
+     N64Recomp::LiveGeneratorInputs recompiler_inputs{
+         .base_event_index = inputs.base_event_index,
+         .cop0_status_write = inputs.cop0_status_write,
+@@ -521,17 +524,25 @@ recomp::mods::LiveRecompilerCodeHandle::LiveRecompilerCodeHandle(
+     // Generate the code.
+     recompiler_output = std::make_unique<N64Recomp::LiveGeneratorOutput>(generator.finish());
+     is_good = !errored && recompiler_output->good;
++#endif
+ }
+ 
+ void recomp::mods::LiveRecompilerCodeHandle::set_imported_function(size_t import_index, GenericFunction func) {
++#ifdef __PS4__ // PS4: no live recompiler (JIT); code mods are refused when their symbols are parsed.
++    (void)import_index; (void)func;
++#else
+     std::visit(overloaded {
+         [this, import_index](recomp_func_t* native_func) {
+             recompiler_output->populate_import_symbol_jumps(import_index, native_func);
+         }
+     }, func);
++#endif
+ }
+ 
+ recomp::mods::CodeModLoadError recomp::mods::LiveRecompilerCodeHandle::populate_reference_symbols(const N64Recomp::Context& context, std::string& error_param) {
++#ifdef __PS4__ // PS4: no live recompiler (JIT); code mods are refused when their symbols are parsed.
++    (void)context; (void)error_param;
++#else
+     size_t num_reference_jumps = recompiler_output->num_reference_symbol_jumps();
+     for (size_t jump_index = 0; jump_index < num_reference_jumps; jump_index++) {
+         N64Recomp::ReferenceJumpDetails jump_details = recompiler_output->get_reference_symbol_jump_details(jump_index);
+@@ -548,6 +559,7 @@ recomp::mods::CodeModLoadError recomp::mods::LiveRecompilerCodeHandle::populate_
+ 
+         recompiler_output->set_reference_symbol_jump(jump_index, cur_func);
+     }
++#endif
+     return CodeModLoadError::Good;
+ }
+ 
+diff --git a/librecomp/src/recomp.cpp b/librecomp/src/recomp.cpp
+index 6deea59..396cbe8 100644
+--- a/librecomp/src/recomp.cpp
++++ b/librecomp/src/recomp.cpp
+@@ -31,6 +31,9 @@
+ #else
+ #    include <sys/mman.h>
+ #endif
++#ifdef __PS4__
++#    include <orbis/libkernel.h>
++#endif
+ 
+ #if defined(_WIN32)
+ #define PATHFMT "%ls"
+@@ -805,6 +808,20 @@ void recomp::start(const recomp::Configuration& cfg) {
+             VirtualFree(rdram, 0, MEM_RELEASE);
+         }
+     }
++#elif defined(__PS4__)
++    // PS4: anonymous mmap draws on the small flexible-memory budget. Reserve the whole range instead and map direct
++    // memory (write-back, CPU and GPU read/write) over its first mem_size bytes; the rest stays unmapped, as on PC.
++    {
++        void* base = nullptr;
++        off_t offset = 0;
++        alloc_failed = sceKernelReserveVirtualRange(&base, allocation_size, 0, 2 * 1024 * 1024) != 0 ||
++            sceKernelAllocateDirectMemory(0, sceKernelGetDirectMemorySize(), mem_size, 2 * 1024 * 1024, 0, &offset) != 0 ||
++            sceKernelMapDirectMemory(&base, mem_size, 0x33, 0x10 /* fixed */, offset, 2 * 1024 * 1024) != 0;
++        rdram = reinterpret_cast<uint8_t*>(base);
++        if (!alloc_failed) {
++            std::memset(rdram, 0, mem_size); // direct memory is not cleared for us
++        }
++    }
+ #else
+     rdram = (uint8_t*)mmap(NULL, allocation_size, PROT_NONE, MAP_ANON | MAP_PRIVATE, -1, 0);
+     alloc_failed = rdram == reinterpret_cast<uint8_t*>(MAP_FAILED);
+diff --git a/ultramodern/include/ultramodern/renderer_context.hpp b/ultramodern/include/ultramodern/renderer_context.hpp
+index 43032ea..c73c525 100644
+--- a/ultramodern/include/ultramodern/renderer_context.hpp
++++ b/ultramodern/include/ultramodern/renderer_context.hpp
+@@ -46,7 +46,13 @@ namespace ultramodern {
+         };
+         ViRegs* get_vi_regs();
+ 
+-#if defined(_WIN32)
++#if defined(__PS4__)
++        // PS4: the video-out handle the renderer presents to (sceVideoOutOpen).
++        struct WindowHandle {
++            int video_out = -1;
++            auto operator<=>(const WindowHandle&) const = default;
++        };
++#elif defined(_WIN32)
+         // Native HWND handle to the target window.
+         struct WindowHandle {
+             HWND window;
+diff --git a/ultramodern/src/events.cpp b/ultramodern/src/events.cpp
+index 39799c2..27ca2da 100644
+--- a/ultramodern/src/events.cpp
++++ b/ultramodern/src/events.cpp
+@@ -26,6 +26,10 @@ void ultramodern::events::set_callbacks(const ultramodern::events::callbacks_t&
+     events_callbacks = callbacks;
+ }
+ 
++#ifdef __PS4__
++extern std::atomic<uint64_t> ps4_gfx_tasks_enqueued, ps4_gfx_tasks_dequeued, ps4_gfx_tasks_released;
++#endif
++
+ struct SpTaskAction {
+     OSTask task;
+     moodycamel::LightweightSemaphore* parsed;
+@@ -365,6 +369,9 @@ void gfx_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_re
+         if (events_context.action_queue.wait_dequeue_timed(action, 1ms)) {
+             // Determine the action type and act on it
+             if (const auto* task_action = std::get_if<SpTaskAction>(&action)) {
++#ifdef __PS4__
++                ps4_gfx_tasks_dequeued.fetch_add(1);
++#endif
+                 // Turn on instant present if the game has been started and it hasn't been turned on yet.
+                 if (ultramodern::is_game_started() && !enabled_instant_present) {
+                     renderer_context->enable_instant_present();
+@@ -605,6 +612,12 @@ extern "C" PTR(void) osViGetCurrentFramebuffer() {
+     return events_context.vi.get_cur_state()->framebuffer;
+ }
+ 
++#ifdef __PS4__
++// PS4 diagnostics (read by the port's watchdog): graphics tasks through the action queue.
++std::atomic<uint64_t> ps4_gfx_tasks_enqueued{0}, ps4_gfx_tasks_dequeued{0}, ps4_gfx_tasks_released{0};
++size_t ps4_action_queue_size() { return events_context.action_queue.size_approx(); }
++#endif
++
+ void ultramodern::submit_rsp_task(RDRAM_ARG PTR(OSTask) task_) {
+     OSTask* task = TO_PTR(OSTask, task_);
+ 
+@@ -612,7 +625,13 @@ void ultramodern::submit_rsp_task(RDRAM_ARG PTR(OSTask) task_) {
+     if (task->t.type == M_GFXTASK) {
+         moodycamel::LightweightSemaphore parsed{ 0 };
+         events_context.action_queue.enqueue(SpTaskAction{ *task, &parsed });
++#ifdef __PS4__
++        ps4_gfx_tasks_enqueued.fetch_add(1);
++#endif
+         parsed.wait();
++#ifdef __PS4__
++        ps4_gfx_tasks_released.fetch_add(1);
++#endif
+     }
+     // Set all other tasks as the RSP task
+     else {

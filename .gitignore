@@ -88,3 +88,13 @@ recompcontrollerdb.txt
 # clangd cache
 .cache/
 .jfg_drive
+
+# PS4 build output (holds code generated from the ROM)
+build-ps4/
+build-ps4-out/
+ps4obj/
+ps4rt/
+build-tools/
+gen.log
+recomp.log
+baserom_in/

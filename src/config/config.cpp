@@ -167,7 +167,11 @@ std::filesystem::path get_executable_folder_path() {
         return cached;
     }
     std::error_code ec;
-#if defined(_WIN32)
+#if defined(__PS4__)
+    // PS4: getcwd() reports nothing; settings, saves and the imported ROM live in /data/jfg (ps4/src/main_ps4.cpp).
+    cached = "/data/jfg";
+    return cached;
+#elif defined(_WIN32)
     std::wstring buffer(32768, L'\0');
     const DWORD length = GetModuleFileNameW(NULL, buffer.data(), (DWORD)buffer.size());
     if (length > 0 && length < buffer.size()) {

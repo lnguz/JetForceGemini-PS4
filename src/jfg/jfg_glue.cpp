@@ -14,6 +14,10 @@
 #else
 #include <sys/mman.h>
 #endif
+#ifdef __PS4__
+#include <cstring>
+#include <orbis/libkernel.h>
+#endif
 
 #include "recomp.h"
 
@@ -197,7 +201,26 @@ namespace recomp { std::span<const uint8_t> get_rom(); }
 namespace {
 bool open_hardware_page(uint8_t* rdram, uint32_t kseg1) {
     uint8_t* page = rdram + ((uint64_t)kseg1 - 0x80000000u) / 0x1000 * 0x1000;
-#ifdef _WIN32
+#if defined(__PS4__)
+    // PS4: the range past the RDRAM is only reserved (sceKernelReserveVirtualRange in librecomp's recomp.cpp), with no
+    // memory behind it, so mprotect cannot open it. Map a 64 KB block of direct memory there instead, once per block.
+    static uintptr_t mapped[16];
+    static int mapped_count = 0;
+    const uintptr_t block = (uintptr_t)page & ~(uintptr_t)0xFFFF;
+    for (int i = 0; i < mapped_count; i++) {
+        if (mapped[i] == block) return true;
+    }
+    off_t offset = 0;
+    void* address = (void*)block;
+    if (mapped_count == 16 ||
+        sceKernelAllocateDirectMemory(0, sceKernelGetDirectMemorySize(), 0x10000, 0x10000, 0, &offset) != 0 ||
+        sceKernelMapDirectMemory(&address, 0x10000, 0x33, 0x10 /* fixed */, offset, 0x10000) != 0) {
+        return false;
+    }
+    memset(address, 0, 0x10000);
+    mapped[mapped_count++] = block;
+    return true;
+#elif defined(_WIN32)
     DWORD old_protect;
     return VirtualProtect(page, 0x1000, PAGE_READWRITE, &old_protect) != 0;
 #else

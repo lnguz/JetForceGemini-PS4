@@ -341,9 +341,9 @@ void load_disk() {
     const nlohmann::json slots = j.value("slots", nlohmann::json::object()); // named: items() doesn't keep a temporary alive
     for (const auto& [slot, s] : slots.items()) {
         SaveState st;
-        for (const auto& v : s.value("unlocked", nlohmann::json::array())) if (v.is_string()) st.unlocked.insert(v);
-        for (const auto& v : s.value("entered", nlohmann::json::array())) if (v.is_string()) st.entered.insert(v);
-        for (const auto& v : s.value("completed", nlohmann::json::array())) if (v.is_string()) st.completed.insert(v);
+        for (const auto& v : s.value("unlocked", nlohmann::json::array())) if (v.is_string()) st.unlocked.insert(v.get<std::string>());
+        for (const auto& v : s.value("entered", nlohmann::json::array())) if (v.is_string()) st.entered.insert(v.get<std::string>());
+        for (const auto& v : s.value("completed", nlohmann::json::array())) if (v.is_string()) st.completed.insert(v.get<std::string>());
         st.galaxy = s.value("galaxy", std::string());
         g_disk[std::atoi(slot.c_str())] = st;
     }
